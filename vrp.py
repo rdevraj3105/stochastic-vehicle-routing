@@ -1,5 +1,6 @@
 import pyomo.environ as pyo
 import numpy as np
+import time
 from pyomo.opt import SolverFactory
 import csv
 
@@ -194,27 +195,44 @@ def rover_routing_model(X, Y, costs, startNode, endNode):
     
     return model
 
+def baseline_cost(X, Y, Z):
+    m = 1.0
+    g = 9.81
+    cost = 0
+    path = []
+
+    for j in range(Y):
+        # Move left to right if even row, right to left if odd row (snake pattern)
+        if j % 2 == 0:
+            # left to right along the row j
+            for i in range(X):
+                path.append((j, i))
+                if i > 0:
+                    delta = Z.get((j, i - 1, j, i), 0)
+                    cost += m * g * delta
+            # Move down one row if not last row
+            if j < Y - 1:
+                delta = Z.get((j, X - 1, j + 1, X - 1), 0)
+                cost += m * g * delta
+                path.append((j + 1, X - 1))
+        else:
+            # right to left along the row j
+            for i in range(X - 1, -1, -1):
+                path.append((j, i))
+                if i < X - 1:
+                    delta = Z.get((j, i + 1, j, i), 0)
+                    cost += m * g * delta
+            # Move down one row if not last row
+            if j < Y - 1:
+                delta = Z.get((j, 0, j + 1, 0), 0)
+                cost += m * g * delta
+                path.append((j + 1, 0))
+
+    return cost, path
+
+
 if __name__ == "__main__":
-    """ opt = SolverFactory("gurobi", tee=True)
-    costMatrix = np.array([[80, 1, 2, 3],
-                           [80, 1, 4, 5],
-                           [80, 4, 3, 6],
-                           [3, 5, 6, 4]])
-    model = rover_routing_model(4, costMatrix, 0, 0)
-    results = opt.solve(model)
-    
-
-    print("Solver metrics")
-    print(results)
-    print("\nDecision Variables")
-    for i in model.nodes:
-       t for j in model.nodes:
-            if model.x[i,j] is not None:
-                print(i,j, model.x[i,j].value) """
-    
-
-    
-
+   
 
     #Mars Data CSV file
     with open('marsCuriosity.csv', 'r') as mars_csv:
@@ -230,10 +248,19 @@ if __name__ == "__main__":
 
     opt = SolverFactory("gurobi", tee=True)
     X, Y, forces = elevationCosts("elevationdata.txt")
+    
+    total_nodes = X * Y
+    print(f"Total nodes: {total_nodes}")
 
     
     model = rover_routing_model(X, Y, forces, startNode = (0,0), endNode = (X - 1, Y-1))
+
+    start_time = time.time()
+
     results = opt.solve(model, options={"OutputFlag": 1})
+
+    end_time = time.time()
+    solver_runtime = end_time - start_time
     print(results)
     for var in model.component_objects(pyo.Var, active=True):
         if var.name == "z":
@@ -243,19 +270,32 @@ if __name__ == "__main__":
                     print("varname: {}, value :{}".format(var.name, var[index]))
 
     with open("vrp_output.txt", "w") as f:
-
         for var in model.component_objects(pyo.Var, active=True):
             if var.name == "z":
                 for index in var:
                     value = var[index].value
                     if value >= 0.5:
                         f.write(f"{index}\n")
-    
-
 
     
-    
 
-        
+    
+    #test comparisons
+    optimized_cost = pyo.value(model.obj)
+    print(f"Optimized total elevation cost: {optimized_cost:.4f}")
+    print(f"Solver runtime (seconds): {solver_runtime:.4f}")
+
+    baseline_cost, baseline_path = baseline_cost(X, Y, forces)
+    print(f"Naive baseline routing cost: {baseline_cost:.4f}")
+
+    # % improvement over baseline
+    cost_reduction = (baseline_cost - optimized_cost) / baseline_cost * 100
+    print(f"Cost reduction compared to baseline: {cost_reduction:.2f}%")
+
+    with open("baseline_cost.txt", 'w') as f:
+        baseline_cost, path = baseline_cost (X, Y, forces)
+        for coord in path:
+            f.write(f"{coord}\n")
+    
     
 
