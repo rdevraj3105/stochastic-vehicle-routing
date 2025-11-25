@@ -4,42 +4,25 @@ import time
 from pyomo.opt import SolverFactory
 import csv
 import heapq
+import random 
 
 def elevationCosts(dataFile):
     with open(dataFile, "r") as file:
         lines = file.readlines()
 
-    
     data = np.zeros((len(lines), 3))
-
-    
     for i, row in enumerate(lines):
-        for k,j in enumerate(row.split()):
-            #print(float(j))
-            data[i,k] = float(j)  
+        for k, j in enumerate(row.split()):
+            data[i, k] = float(j)  
 
     x = np.unique(data[:, 0])
     y = np.unique(data[:, 1])
-    
-
-
-    dimX,dimY = len(y),len(x)
-    
-
-    
+    dimX, dimY = len(y), len(x)
     Z = data[:, 2].reshape(len(y), len(x))
 
-    #print(Z)
-
-    m = 1.0    # mass in kg
-    g = 9.81   # gravitational acceleration in m/s²
-
-    # Initialize force array
+    m, g = 1.0, 9.81
     f = {} 
 
-    
-
-    # Loop through the coordinates within bounds to calculate forces
     for i in range(Z.shape[0]):
         for j in range(Z.shape[1]):
             if i == 0:
@@ -58,141 +41,142 @@ def elevationCosts(dataFile):
 
             for dx in dx_ls:
                 for dy in dy_ls:
+                    if dx == 0 and dy == 0:
+                        continue
                     f[(i, j, i + dx, j + dy)] = abs(m * g * (Z[i + dx, j + dy] - Z[i, j]))
 
-
-    #print(len(x))
-    #print(len(y))
     return dimX, dimY, f, Z
 
 
-def rover_routing_model(X, Y, costs, startNode, endNode):
+def rover_routing_model(X, Y, costs, startNode, target_sites, eliminate_subtours=True):
     """
-    Creates a Pyomo model for a small deterministic Mars rover vehicle routing problem.
-    The cost matrix c is represented as a dictionary 'cost_dict' where keys are tuples (i, j)
-    representing edges, and values are the travel costs between nodes i and j.
-
-    Parameters:
-    - nodes (int): Number of nodes (1 depot and n-1 nodes/locations).
-    - costs (list): Cost matrix representing travel costs between each pair of nodes.
-
+    Mars rover routing - visits target sites with intermediate nodes allowed.
     
-    Returns:
-    - model (ConcreteModel): A Pyomo model for the vehicle routing problem.
+    Constraints:
+    1. Start leaves once, never entered
+    2. Each target entered exactly once
+    3. Total outgoing from all targets = N-1 (one is terminal)
+    4. Each target leaves at most once
+    5. Flow conservation: inflow = outflow for all nodes (except start and terminal)
+    6. Subtour elimination via MTZ
     """
     
     model = pyo.ConcreteModel()
-    #print(X,Y)
-    model.x_start = pyo.RangeSet(0, X -1)
-    model.y_start = pyo.RangeSet(0, Y -1)
     
-    model.x_end = pyo.RangeSet(0, X -1)
-    model.y_end = pyo.RangeSet(0, Y -1)
+    model.x_start = pyo.RangeSet(0, X - 1)
+    model.y_start = pyo.RangeSet(0, Y - 1)
+    model.x_end = pyo.RangeSet(0, X - 1)
+    model.y_end = pyo.RangeSet(0, Y - 1)
 
-    # i = range(costs.shape()[0])
-    # j = range(costs.shape()[1])
     
-  
-    #print([key for key in costs.keys() if 30 in key])
+    valid_costs = {k: v for k, v in costs.items() 
+                   if not (k[0] == k[2] and k[1] == k[3])}
+    
+    print(f"{'='*60}")
+    print(f"Grid: {X} x {Y} = {X*Y} nodes")
+    print(f"Valid edges: {len(valid_costs)}")
+    print(f"Start: {startNode}")
+    print(f"Targets ({len(target_sites)}): {target_sites}")
 
-    model.z = pyo.Var(costs.keys(), within=pyo.Binary)
+    
+    model.z = pyo.Var(valid_costs.keys(), within=pyo.Binary)
 
+    
     def obj_rule(model):
-        return sum(model.z[index] * costs[index] for index in costs.keys())
+        return sum(model.z[index] * valid_costs[index] for index in valid_costs.keys())
     model.obj = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
-    """    def leave_onceRule(model, x, y):
-        
-       # Ensure that each node except the endNode is left exactly once.
-        
-        if (x, y) == endNode:
-            return pyo.Constraint.Skip  # Skip the end node since it doesn't leave anywhere
-        else:
-            valid_edges = [(x, y, x1, y1) for x1 in model.x_end for y1 in model.y_end if (x, y, x1, y1) in costs.keys()]
-            if not valid_edges:  # If there are no valid edges, skip the constraint
-                return pyo.Constraint.Skip
-            return sum(model.z[(x,y)] for (edge) in valid_edges) == 1
-    """
-    def leave_once_rule(model, x, y):
-        if (x,y) == endNode:
-            return sum(sum(model.z[x,y,k,l] for k in model.x_end if (x, y, k, l) in costs.keys()) for l in model.y_end) == 0 # Skip the end node since it doesn't leave anywhere
-        elif (x,y) == startNode:
-            return sum(sum(model.z[x,y,k,l] for k in model.x_end if (x, y, k, l) in costs.keys()) for l in model.y_end) == 1
-        else:
-            return sum(sum(model.z[x,y,k,l] for k in model.x_end if (x, y, k, l) in costs.keys()) for l in model.y_end) <= 1
- 
-        
-        # Ensure there are valid edges to move forward
-        #valid_edges = [(x, y) for y in model.x_end if (x, y) in costs.keys()]
-        
-        """ if not valid_edges:
-            return pyo.Constraint.Skip """  # Skip the constraint if no valid edges
-        
-        # Return the constraint expression
-       
+    # Constraint 1: Start leaves exactly once
+    def start_leaves_rule(model):
+        x, y = startNode
+        return sum(sum(model.z[x, y, k, l] for k in model.x_end if (x, y, k, l) in valid_costs.keys()) for l in model.y_end) == 1
+    model.start_leaves = pyo.Constraint(rule=start_leaves_rule)
 
-    model.leave_once = pyo.Constraint(model.x_start, model.y_start, rule=leave_once_rule)
- 
-    
+    # Constraint 2: Start never entered
+    def start_never_entered_rule(model):
+        x, y = startNode
+        return sum(sum(model.z[k, l, x, y] for k in model.x_end if (k, l, x, y) in valid_costs.keys()) for l in model.y_end) == 0
+    model.start_never_entered = pyo.Constraint(rule=start_never_entered_rule)
 
-    """ def arrive_once_rule(model, x, y):
-        
-       # Ensures that each node (except the startNode) is entered exactly once.
-        
-        if (x, y) == startNode:
-            return pyo.Constraint.Skip  # Skip the start node since it doesn't enter from anywhere
-        else:
-            valid_edges = [(x1, y1, x, y) for x1 in model.x_end for y1 in model.y_end if (x1, y1, x, y) in costs.keys()]
-            if not valid_edges:  # If there are no valid edges, skip the constraint
-                return pyo.Constraint.Skip
-            return sum(model.z[edge] for edge in valid_edges) == 1 """
-    
-    def arrive_once_rule(model, x, y):
-        if (x,y) == startNode:
-            return sum(sum(model.z[k,l,x,y] for k in model.x_end if (k, l, x, y) in costs.keys()) for l in model.y_end) == 0   # Skip the start node since it doesn't enter from anywhere
-        elif (x,y) == endNode:
-            return sum(sum(model.z[k,l,x,y] for k in model.x_end if (k, l, x, y) in costs.keys()) for l in model.y_end) == 1
-        else:
-            return sum(sum(model.z[k,l,x,y] for k in model.x_end if (k, l, x, y) in costs.keys()) for l in model.y_end) <= 1
-    """     # Ensure there are valid edges to move from
-        valid_edges = [(x, y) for x in model.x_start if (x, y) in costs.keys()]
-        
-        if not valid_edges:
-            return pyo.Constraint.Skip  # Skip the constraint if no valid edges
-         """
-        # Return the constraint expression
-   
-    model.arrive_once = pyo.Constraint(model.x_end, model.y_end, rule=arrive_once_rule)   
-
-
-    #model.arrive_once = pyo.Constraint(model.x_start, model.y_start, rule= arrive_once_rule)
-
-    def enter_must_leave_rule(model, x, y):
-        if (x,y) == startNode or (x,y) == endNode:
-            return pyo.Constraint.Skip
-        else:
-            influx = sum(sum(model.z[x,y,k,l] for k in model.x_end if (x,y,k,l) in costs.keys() and (x,y) != (k,l)) for l in model.y_end)
-            outflux = sum(sum(model.z[k,l,x,y] for k in model.x_end if (k,l,x,y) in costs.keys() and (x,y) != (k,l)) for l in model.y_end)
-            return influx == outflux
-            
-            
-    model.enter_must_leave_rule = pyo.Constraint(model.x_end, model.y_end, rule = enter_must_leave_rule)
-
-    #Subtour Elimination Constraints (MTZ)
-    #Let model.u represent the sequences of visits for each node
-    model.u = pyo.Var(model.x_start, model.y_start, within=pyo.NonNegativeIntegers, bounds=(1, X * Y))
-
-    # Ensure start node is first in sequence
-    model.u[startNode] = 1
-    def subtour_elimination_rule(model, x, y, k, l):
-        if (x, y, k, l) in costs.keys() and (x, y) != startNode and (k, l) != startNode:
-            return model.u[x, y] + 1 <= model.u[k, l] + X * Y * (1 - model.z[x, y, k, l])
-        
-        #if (x, y, k, l) in costs.keys() and (x, y) != startNode and (k, l) != startNode:
-            #return model.u[x, y] + 1 >= model.u[k, l] + X * Y * (1 - model.z[x, y, k, l])
+    # Constraint 3: Each target entered exactly once
+    def target_entered_once_rule(model, x, y):
+        if (x, y) in target_sites:
+            incoming = sum(sum(model.z[k, l, x, y] for k in model.x_end if (k, l, x, y) in valid_costs.keys()) for l in model.y_end)
+            return incoming == 1
         return pyo.Constraint.Skip
+    model.target_entered_once = pyo.Constraint(model.x_start, model.y_start, rule=target_entered_once_rule)
+    
 
-    model.subtour_elimination = pyo.Constraint(model.x_start, model.y_start, model.x_end, model.y_end, rule=subtour_elimination_rule)
+    # Constraint 4: Exactly N-1 targets have outflow = 1, and exactly 1 has outflow = 0
+    def total_target_outgoing_rule(model):
+        total = sum(sum(sum(model.z[x, y, k, l] for k in model.x_end if (x, y, k, l) in valid_costs.keys()) for l in model.y_end) for (x, y) in target_sites)
+        return total == len(target_sites) - 1
+    model.total_target_outgoing = pyo.Constraint(rule=total_target_outgoing_rule)
+
+    # Constraint 5: Flow balance for targets
+    # Each target: inflow = 1 (always entered once)
+    # outflow = 0 or 1 (terminal or intermediate)
+    # inflow - outflow = 0 or 1
+    def target_flow_balance_rule(model, x, y):
+        if (x, y) not in target_sites:
+            return pyo.Constraint.Skip
+        
+        inflow = sum(sum(model.z[k, l, x, y] for k in model.x_end if (k, l, x, y) in valid_costs.keys()) for l in model.y_end)
+    
+        outflow = sum(sum(model.z[x, y, k, l] for k in model.x_end if (x, y, k, l) in valid_costs.keys()) for l in model.y_end)
+        
+        
+        return inflow - outflow >= 0  
+    
+    model.target_flow_balance = pyo.Constraint(model.x_start, model.y_start, rule=target_flow_balance_rule)
+
+    # Constraint 6: Flow conservation for all nodes
+    def flow_conservation_rule(model, x, y):
+        if (x, y) == startNode:
+            return pyo.Constraint.Skip
+        
+        inflow = sum(sum(model.z[k, l, x, y] for k in model.x_end if (k, l, x, y) in valid_costs.keys()) for l in model.y_end)
+        
+        outflow = sum(sum(model.z[x, y, k, l] for k in model.x_end if (x, y, k, l) in valid_costs.keys()) for l in model.y_end)
+        
+        # Target sites: inflow=1, outflow=0 or 1
+        # Non-target intermediate: inflow=outflow (balanced, or both=0 if unused)
+        if (x, y) in target_sites:
+            # Targets: inflow - outflow can be 0 (intermediate) or 1 (terminal)
+            return inflow - outflow >= 0
+        else:
+            # Non-targets: must be balanced
+            return inflow == outflow
+    
+    model.flow_conservation = pyo.Constraint(model.x_start, model.y_start, rule=flow_conservation_rule)
+
+    if eliminate_subtours:
+        # MTZ subtour elimination
+        
+        model.u = pyo.Var(model.x_start, model.y_start, within=pyo.NonNegativeIntegers,  bounds=(0, X * Y))
+        model.u[startNode].fix(0)
+
+        def subtour_rule(model, i, j, k, l):
+            if (i, j, k, l) not in valid_costs.keys():
+                return pyo.Constraint.Skip
+            
+            if (i, j) == startNode:
+                return pyo.Constraint.Skip
+            
+            # MTZ: if edge (i,j) -> (k,l) is used, then u[k,l] > u[i,j]
+            M = X * Y
+            return model.u[k, l] >= model.u[i, j] + 1 - M * (1 - model.z[i, j, k, l])
+
+        model.subtour_elimination = pyo.Constraint(model.x_start, model.y_start, model.x_end, model.y_end, rule=subtour_rule)
+        
+        def target_order_bound_rule(model, x, y):
+            if (x, y) in target_sites:
+                return model.u[x, y] <= X * Y
+            return pyo.Constraint.Skip
+        
+        model.target_order_bound = pyo.Constraint(model.x_start, model.y_start, rule=target_order_bound_rule)
+    
+    
     
     return model
 
@@ -231,7 +215,6 @@ def a_star(X, Y, Z, start, goal, forces_dict=None):
         f_score, cost_so_far, current, path = heapq.heappop(open_set)
         nodes_explored += 1
         
-        # Skip if we've already found a better path to this node
         if current in closed_set:
             continue
             
@@ -423,7 +406,7 @@ def rolling_horizon_optimization(X, Y, Z_true, Z_estimate, horizon = 3, start = 
     return path, total_cost, results
 
 
-def run_deterministic():
+def run_deterministic_multi_sites():
     
     #Mars Data CSV file
     with open('marsCuriosity.csv', 'r') as mars_csv:
@@ -443,12 +426,17 @@ def run_deterministic():
     total_nodes = X * Y
     print(f"Total nodes: {total_nodes}")
 
-    
-    model = rover_routing_model(X, Y, forces, startNode = (0,0), endNode = (X - 1, Y-1))
+    random.seed(21)
+    total_nodes = [(i,j) for i in range(X) for j in range(Y)]
+    total_nodes.remove((0,0))
+    target_sites = random.sample(total_nodes, min(3, len(total_nodes)))
+
+    print(f"Target sites to visit: {target_sites}")
+    model = rover_routing_model(X, Y, forces, startNode = (0,0), target_sites = target_sites, eliminate_subtours=True)
 
     start_time = time.time()
 
-    results = opt.solve(model, options={"OutputFlag": 1})
+    results = opt.solve(model, tee=True, options={"OutputFlag": 1})
 
     end_time = time.time()
     solver_runtime = end_time - start_time
@@ -457,7 +445,7 @@ def run_deterministic():
         if var.name == "z":
             for index in var:
                 value =var[index].value
-                if value >= 0.5:
+                if value is not None and value >= 0.5:
                     print("varname: {}, value :{}".format(var.name, var[index]))
 
     with open("vrp_output.txt", "w") as f:
@@ -465,7 +453,7 @@ def run_deterministic():
             if var.name == "z":
                 for index in var:
                     value = var[index].value
-                    if value >= 0.5:
+                    if value is not None and value >= 0.5:
                         f.write(f"{index}\n")
 
     
@@ -514,7 +502,7 @@ def run_stochastic():
 
 
 if __name__ == "__main__":
-    run_deterministic()
+    run_deterministic_multi_sites()
     X, Y, forces, Z = elevationCosts("elevationdata.txt")
     
     start = (0, 0)
